@@ -1,8 +1,6 @@
 import random
-import urllib.request
-import urllib.error
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.parse
+import socket
+import threading
 import os
 
 PROXY_FILE = "proxies.txt"
@@ -23,63 +21,88 @@ PROXIES = load_proxies()
 def get_random_proxy():
     return random.choice(PROXIES)
 
-def fetch_via_proxy(url):
-    host, port, user, password = get_random_proxy()
-    proxy_handler = urllib.request.ProxyHandler({
-        "http": f"http://{user}:{password}@{host}:{port}",
-        "https": f"http://{user}:{password}@{host}:{port}",
-    })
-    opener = urllib.request.build_opener(proxy_handler)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    resp = opener.open(req, timeout=15)
-    return resp.read(), resp.status, dict(resp.headers)
-
-class APIHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        params = urllib.parse.parse_qs(parsed.query)
-
-        if parsed.path == "/fetch":
-            if "url" not in params:
-                self._respond(400, b"Missing ?url= parameter")
-                return
-            target_url = params["url"][0]
-            try:
-                body, status, headers = fetch_via_proxy(target_url)
-                self.send_response(status)
-                for k, v in headers.items():
-                    if k.lower() in ("content-type",):
-                        self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception as e:
-                self._respond(502, f"Error: {str(e)}".encode())
-
-        elif parsed.path == "/ip":
-            try:
-                body, _, _ = fetch_via_proxy("https://api.ipify.org?format=json")
-                self._respond(200, body)
-            except Exception as e:
-                self._respond(502, f"Error: {str(e)}".encode())
-
-        elif parsed.path == "/":
-            self._respond(200, f"Rotating proxy is live. {len(PROXIES)} proxies loaded.".encode())
-
-        else:
-            self._respond(404, b"Not found")
-
-    def _respond(self, code, body):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
+def forward(src, dst):
+    try:
+        while True:
+            data = src.recv(4096)
+            if not data:
+                break
+            dst.sendall(data)
+    except:
         pass
+    finally:
+        try: src.close()
+        except: pass
+        try: dst.close()
+        except: pass
+
+def handle_client(client_sock):
+    try:
+        request = b""
+        while b"\r\n\r\n" not in request:
+            chunk = client_sock.recv(4096)
+            if not chunk:
+                return
+            request += chunk
+
+        first_line = request.split(b"\r\n")[0].decode()
+        method, path, _ = first_line.split(" ", 2)
+
+        host, port, user, password = get_random_proxy()
+        proxy_sock = socket.create_connection((host, int(port)), timeout=15)
+
+        if method == "CONNECT":
+            auth = f"{user}:{password}"
+            import base64
+            encoded = base64.b64encode(auth.encode()).decode()
+            proxy_request = (
+                f"CONNECT {path} HTTP/1.1\r\n"
+                f"Host: {path}\r\n"
+                f"Proxy-Authorization: Basic {encoded}\r\n\r\n"
+            )
+            proxy_sock.sendall(proxy_request.encode())
+            resp = proxy_sock.recv(4096)
+            if b"200" in resp:
+                client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            else:
+                client_sock.close()
+                return
+        else:
+            auth = f"{user}:{password}"
+            import base64
+            encoded = base64.b64encode(auth.encode()).decode()
+            lines = request.split(b"\r\n")
+            lines.insert(1, f"Proxy-Authorization: Basic {encoded}".encode())
+            request = b"\r\n".join(lines)
+            proxy_sock.sendall(request)
+
+        t1 = threading.Thread(target=forward, args=(client_sock, proxy_sock))
+        t2 = threading.Thread(target=forward, args=(proxy_sock, client_sock))
+        t1.daemon = True
+        t2.daemon = True
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    except Exception as e:
+        print(f"Error: {e}")
+        try: client_sock.close()
+        except: pass
+
+def main():
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Loaded {len(PROXIES)} proxies")
+    print(f"Rotating proxy running on port {port}...")
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", port))
+    server.listen(100)
+    while True:
+        client_sock, _ = server.accept()
+        t = threading.Thread(target=handle_client, args=(client_sock,))
+        t.daemon = True
+        t.start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    print(f"Loaded {len(PROXIES)} proxies")
-    print(f"API running on port {port}...")
-    server = HTTPServer(("0.0.0.0", port), APIHandler)
-    server.serve_forever()
+    main()
