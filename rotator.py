@@ -83,12 +83,3 @@ if __name__ == "__main__":
     print(f"API running on port {port}...")
     server = HTTPServer(("0.0.0.0", port), APIHandler)
     server.serve_forever()
-```
-
-6. Click **"Commit changes"**
-
----
-
-Render will **automatically redeploy** once you commit. Wait ~2 minutes for it to go live again, then we'll test with:
-```
-https://rotating-proxy-vt2c.onrender.com/ip
